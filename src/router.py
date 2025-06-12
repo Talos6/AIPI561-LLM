@@ -1,118 +1,57 @@
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
-import requests
-from typing import List, Optional
-from cache import Cache
-from settings import Settings
+from fastapi import APIRouter, HTTPException, Form
+from src.cache import Cache
+from src.llm import llm
 import json
 import logging
+import hashlib
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 router = APIRouter()
-settings = Settings()
 cache = Cache()
 
-class GenerateRequest(BaseModel):
-    prompt: str
-    max_tokens: Optional[int] = 100
-    temperature: Optional[float] = 0.7
-    model: Optional[str] = None  # Will use default from settings if not specified
+def create_cache_key(prompt):
+    key_data = {
+        "prompt": prompt
+    }
+    key_string = json.dumps(key_data, sort_keys=True)
+    return hashlib.md5(key_string.encode()).hexdigest()
 
-class GenerateResponse(BaseModel):
-    text: str
-    model: str
-    cached: bool = False
-
-def check_ollama_health():
-    try:
-        response = requests.get(
-            f"{settings.ollama_api_url}/api/version",
-            timeout=10
-        )
-        response.raise_for_status()
-        logger.info("Ollama health check passed")
-        return True
-    except Exception as e:
-        logger.error(f"Ollama health check failed: {e}")
-        return False
-
-@router.post("/generate", response_model=GenerateResponse)
-async def generate_text(request: GenerateRequest):
-    if not check_ollama_health():
+@router.post("/ask")
+async def generate_text(prompt = Form(...)):
+    if not llm.is_model_loaded():
         raise HTTPException(
             status_code=503,
-            detail="Ollama service is not available"
+            detail="LLM is not available. Model may not be loaded."
         )
 
-    # Use model from request or default from settings
-    model = request.model or settings.ollama_model
+    cache_key = create_cache_key(prompt)
     
-    # Try to get from cache first
-    cache_key = f"{model}:{request.prompt}"
     cached_response = cache.get(cache_key)
     
     if cached_response:
-        logger.info(f"Cache hit for key: {cache_key[:50]}...")
-        return GenerateResponse(
-            text=cached_response,
-            model=model,
-            cached=True
-        )
+        logger.info(f"Cache hit for key: {cache_key[:16]}...")
+        cached_data = json.loads(cached_response)
+        return {
+            "response": cached_data,
+            "cached": True
+        }
 
     try:
-        logger.info(f"Generating text with model: {model}")
+        logger.info(f"Generating text with prompt: {prompt[:50]}...")
+        result = llm.generate_text(prompt)
+        logger.info(f"Caching response for key: {cache_key[:16]}...")
+        cache.set(cache_key, json.dumps(result))
         
-        # Use Ollama
-        response = requests.post(
-            f"{settings.ollama_api_url}/api/generate",
-            json={
-                "model": model,
-                "prompt": request.prompt,
-                "options": {
-                    "num_predict": request.max_tokens,
-                    "temperature": request.temperature
-                },
-                "stream": False
-            },
-            timeout=settings.ollama_timeout
-        )
-        response.raise_for_status()
+        return {
+            "response": result,
+            "cached": False
+        }
         
-        response_data = response.json()
-        logger.info(f"Ollama response: {response_data}")
-        
-        generated_text = response_data.get("response", "")
-        if not generated_text:
-            raise HTTPException(
-                status_code=500,
-                detail="No response generated from Ollama"
-            )
-        
-        # Cache the response
-        if cache.set(cache_key, generated_text):
-            logger.info(f"Cached response for key: {cache_key[:50]}...")
-        else:
-            logger.warning("Failed to cache response")
-        
-        return GenerateResponse(
-            text=generated_text,
-            model=model,
-            cached=False
-        )
-    except requests.exceptions.Timeout:
-        logger.error("Request to Ollama timed out")
+    except RuntimeError as e:
+        logger.error(f"LLM error: {str(e)}")
         raise HTTPException(
-            status_code=504,
-            detail="Request to Ollama timed out"
-        )
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error generating text: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error generating text: {str(e)}"
+            status_code=503,
+            detail=f"LLM error: {str(e)}"
         )
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
@@ -121,53 +60,47 @@ async def generate_text(request: GenerateRequest):
             detail=f"Unexpected error: {str(e)}"
         )
 
-@router.get("/models", response_model=List[str])
-async def list_models():
+@router.post("/model/load")
+async def load_model():
     try:
-        response = requests.get(
-            f"{settings.ollama_api_url}/api/tags",
-            timeout=settings.ollama_timeout
-        )
-        response.raise_for_status()
-        data = response.json()
-        models = [model.get("name", "") for model in data.get("models", [])]
+        if llm.is_model_loaded():
+            return {"message": "Model already loaded", "loaded": True}
         
-        if not models:
-            return [settings.ollama_model]  # Return default model if no others found
-            
-        return models
+        success = llm.load_model()
+        if success:
+            return {"message": "Model loaded successfully", "loaded": True}
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to load model"
+            )
     except Exception as e:
-        logger.error(f"Error fetching models: {str(e)}")
+        logger.error(f"Error loading model: {str(e)}")
         raise HTTPException(
-            status_code=503,
-            detail=f"Error fetching models: {str(e)}"
+            status_code=500,
+            detail=f"Error loading model: {str(e)}"
         )
 
-@router.get("/health")
-async def health_check():
-    ollama_healthy = check_ollama_health()
-    cache_healthy = cache.ping()
-    
-    if not ollama_healthy:
+@router.post("/model/unload")
+async def unload_model():
+    try:
+        llm.unload_model()
+        return {"message": "Model unloaded successfully", "loaded": False}
+    except Exception as e:
+        logger.error(f"Error unloading model: {str(e)}")
         raise HTTPException(
-            status_code=503,
-            detail="Ollama service is not healthy"
+            status_code=500,
+            detail=f"Error unloading model: {str(e)}"
         )
-        
-    if not cache_healthy:
-        raise HTTPException(
-            status_code=503,
-            detail="Cache service is not healthy"
-        )
-    
-    return {
-        "status": "healthy",
-        "ollama": ollama_healthy,
-        "cache": cache_healthy,
-        "cache_type": "memory"
-    }
 
-@router.get("/cache/stats")
-async def cache_stats():
-    """Get cache statistics"""
-    return cache.get_stats()
+@router.delete("/cache")
+async def clear_cache():
+    try:
+        cache.clear()
+        return {"message": "Cache cleared successfully"}
+    except Exception as e:
+        logger.error(f"Error clearing cache: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error clearing cache: {str(e)}"
+        )
