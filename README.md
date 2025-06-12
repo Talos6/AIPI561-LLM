@@ -1,109 +1,223 @@
-# Local LLM Deployment with Ollama and AWS Bedrock
+# Local LLM API with Ollama
 
-This project implements a flexible LLM deployment using either Ollama (for local deployment) or AWS Bedrock, with an API wrapper and caching capabilities deployed on AWS App Runner.
+A FastAPI-based service that provides text generation using Ollama's local LLM models, with in-memory caching and AWS App Runner deployment.
 
 ## Features
 
-- Dual LLM support:
-  - Local deployment using Ollama with TinyLlama (optimized for limited GPU consumption)
-  - Cloud deployment using AWS Bedrock
-- RESTful API wrapper
-- Response caching for improved performance
-- AWS App Runner deployment support
-- Comprehensive documentation
+- 🤖 Local LLM text generation using Ollama (tinyllama model)
+- 🗄️ Simple in-memory caching to avoid duplicate questions
+- 🚀 FastAPI with automatic API documentation
+- 🐳 Docker containerization for easy deployment
+- ☁️ AWS App Runner ready deployment
+- 🔍 Comprehensive health checks and monitoring
+- 📊 Cache statistics and debugging tools
 
 ## Quick Start
 
-1. Install dependencies:
-```bash
-pip install -r requirements.txt
+### Local Development
+
+1. **Install Dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. **Install Ollama**
+   ```bash
+   # On macOS/Linux
+   curl -fsSL https://ollama.ai/install.sh | sh
+   
+   # Start Ollama service
+   ollama serve
+   
+   # Pull the model
+   ollama pull tinyllama
+   ```
+
+3. **Run the Application**
+   ```bash
+   python src/main.py
+   ```
+
+4. **Test the API**
+   ```bash
+   # Health check
+   curl http://localhost:8000/v1/health
+   
+   # Generate text
+   curl -X POST "http://localhost:8000/v1/generate" \
+     -H "Content-Type: application/json" \
+     -d '{"prompt": "Hello, how are you?", "max_tokens": 100}'
+   ```
+
+### Docker Deployment
+
+1. **Build the Image**
+   ```bash
+   docker build -t local-llm-api .
+   ```
+
+2. **Run the Container**
+   ```bash
+   docker run -p 8000:8000 local-llm-api
+   ```
+
+### AWS App Runner Deployment
+
+1. **Connect your GitHub repository to AWS App Runner**
+2. **Use the provided `apprunner.yaml` configuration**
+3. **Set required environment variables**
+4. **Deploy with 4+ vCPU and 8+ GB RAM**
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for detailed deployment instructions and troubleshooting.
+
+## API Endpoints
+
+### Text Generation
+- **POST** `/v1/generate` - Generate text using the LLM
+  ```json
+  {
+    "prompt": "Your prompt here",
+    "max_tokens": 100,
+    "temperature": 0.7,
+    "model": "tinyllama"
+  }
+  ```
+
+### Model Management
+- **GET** `/v1/models` - List available models
+
+### Health & Monitoring
+- **GET** `/health` - Basic health check
+- **GET** `/v1/health` - Detailed health check with service status
+- **GET** `/v1/cache/stats` - Cache usage statistics
+
+### API Documentation
+- **GET** `/docs` - Interactive Swagger UI
+- **GET** `/redoc` - ReDoc documentation
+
+## Configuration
+
+Environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | 8000 | API server port |
+| `DEBUG_MODE` | false | Enable debug mode |
+| `OLLAMA_MODEL` | tinyllama | Default LLM model |
+| `OLLAMA_TIMEOUT` | 60 | Ollama API timeout (seconds) |
+| `CACHE_TTL` | 3600 | Cache TTL (seconds) |
+
+## Caching Strategy
+
+The application uses a simple in-memory caching system:
+
+1. **In-memory cache**: Fast local caching for duplicate question detection
+2. **TTL support**: Configurable cache expiration (default 1 hour)
+3. **Automatic cleanup**: Expired entries are automatically removed
+4. **Simple and reliable**: No external dependencies required
+
+## Architecture
+
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   FastAPI App   │───▶│ In-Memory Cache │───▶│   Ollama LLM    │
+│                 │    │                 │    │                 │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+         │                       │                       │
+         ▼                       ▼                       ▼
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Health Checks │    │ Cache Statistics│    │  Model Download │
+│   Monitoring    │    │   & Management  │    │   & Management  │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
 ```
 
-2. For local development with Ollama:
-```bash
-# Install Ollama (MacOS/Linux)
-curl https://ollama.ai/install.sh | sh
+## Development
 
-# Pull the TinyLlama model (optimized for limited GPU usage)
-ollama pull tinyllama
+### Project Structure
 ```
-
-3. Configure environment variables:
-```bash
-# API Settings
-DEBUG_MODE=false
-PORT=8000
-
-# Model Settings
-USE_BEDROCK=true  # Set to false for local-only deployment
-BEDROCK_MODEL_ID=anthropic.claude-v2
-OLLAMA_MODEL=tinyllama
-
-# Redis Settings
-REDIS_HOST=your-redis-host
-REDIS_PORT=6379
-REDIS_PASSWORD=your-redis-password
-
-# AWS Settings
-AWS_ACCESS_KEY_ID=your-access-key
-AWS_SECRET_ACCESS_KEY=your-secret-key
-AWS_REGION=us-east-1
-```
-
-4. Start the API server:
-```bash
-python src/main.py
-```
-
-## Project Structure
-
-```
-.
 ├── src/
-│   ├── main.py              # Main application entry point
-│   ├── api/                 # API implementation
-│   ├── cache/              # Caching implementation
-│   └── config/             # Configuration files
-├── tests/                  # Unit tests
-├── docs/                   # Documentation
-├── Dockerfile             # Docker configuration
-├── apprunner.yaml         # AWS App Runner configuration
-└── requirements.txt       # Python dependencies
+│   ├── main.py              # FastAPI application entry point
+│   ├── api/
+│   │   └── router.py        # API routes and handlers
+│   ├── cache/
+│   │   └── redis_cache.py   # In-memory cache implementation
+│   ├── config/
+│   │   └── settings.py      # Configuration management
+│   └── test_app.py          # Diagnostic testing script
+├── tests/                   # Unit tests
+├── docs/                    # Documentation
+├── Dockerfile               # Container definition
+├── apprunner.yaml          # AWS App Runner configuration
+├── requirements.txt        # Python dependencies
+└── DEPLOYMENT.md           # Deployment guide
 ```
 
-## API Documentation
+### Running Tests
+```bash
+# Run diagnostic tests
+python src/test_app.py
 
-The API provides the following endpoints:
+# Run unit tests
+pytest tests/
+```
 
-- `POST /v1/generate`: Generate text using the configured LLM (Bedrock or Ollama)
-- `GET /v1/models`: List available models
-- `GET /v1/health`: Health check endpoint
+### Adding New Models
 
-For detailed API documentation, see [API.md](docs/API.md)
+1. **Download the model**
+   ```bash
+   ollama pull llama2:7b
+   ```
 
-## Performance Metrics
+2. **Update the default model**
+   ```bash
+   export OLLAMA_MODEL=llama2:7b
+   ```
 
-See [PERFORMANCE.md](docs/PERFORMANCE.md) for detailed performance metrics and benchmarks.
+3. **Restart the application**
 
-## Deployment Guide
+## Troubleshooting
 
-This project is configured for deployment on AWS App Runner. For detailed deployment instructions, see [DEPLOYMENT.md](docs/DEPLOYMENT.md)
+### Common Issues
 
-### Key Deployment Features
+1. **Ollama not starting**: Check if the service is running and accessible
+2. **Model download fails**: Ensure internet connectivity and sufficient disk space
+3. **Memory issues**: Use smaller models (tinyllama) or increase container memory
+4. **Cache statistics**: Check `/v1/cache/stats` for cache performance
 
-1. AWS App Runner deployment for simplified container management
-2. Integration with AWS Bedrock for scalable cloud-based inference
-3. Optional local deployment using Ollama with TinyLlama for reduced GPU consumption
-4. Redis caching for improved response times
+### Debug Tools
+
+- Use `src/test_app.py` for comprehensive diagnostics
+- Check `/v1/health` endpoint for service status
+- Monitor logs for detailed error information
+- Use `/v1/cache/stats` for cache performance
+
+## Performance
+
+### Recommended Resources
+- **Minimum**: 4 vCPU, 8GB RAM
+- **Production**: 8 vCPU, 16GB RAM
+
+### Model Comparison
+| Model | Size | Speed | Quality |
+|-------|------|-------|---------|
+| tinyllama | 1.1GB | Fast | Basic |
+| llama2:7b | 3.8GB | Medium | Good |
+| codellama:7b | 3.8GB | Medium | Code-focused |
+
+## License
+
+MIT License - see LICENSE file for details.
 
 ## Contributing
 
 1. Fork the repository
-2. Create your feature branch
-3. Commit your changes
-4. Push to the branch
-5. Create a new Pull Request
+2. Create a feature branch
+3. Make your changes
+4. Add tests
+5. Submit a pull request
 
-## License
+## Support
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+- Check [DEPLOYMENT.md](DEPLOYMENT.md) for deployment issues
+- Use the diagnostic script: `python src/test_app.py`
+- Review application logs for detailed error information

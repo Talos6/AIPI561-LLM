@@ -2,13 +2,18 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 import requests
 from typing import List, Optional
-from cache.redis_cache import RedisCache
-from config.settings import Settings
+from cache import Cache
+from settings import Settings
 import json
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 settings = Settings()
-cache = RedisCache()
+cache = Cache()
 
 class GenerateRequest(BaseModel):
     prompt: str
@@ -24,12 +29,14 @@ class GenerateResponse(BaseModel):
 def check_ollama_health():
     try:
         response = requests.get(
-            f"{settings.ollama_api_url}/api/health",
-            timeout=settings.ollama_timeout
+            f"{settings.ollama_api_url}/api/version",
+            timeout=10
         )
         response.raise_for_status()
+        logger.info("Ollama health check passed")
         return True
-    except Exception:
+    except Exception as e:
+        logger.error(f"Ollama health check failed: {e}")
         return False
 
 @router.post("/generate", response_model=GenerateResponse)
@@ -48,6 +55,7 @@ async def generate_text(request: GenerateRequest):
     cached_response = cache.get(cache_key)
     
     if cached_response:
+        logger.info(f"Cache hit for key: {cache_key[:50]}...")
         return GenerateResponse(
             text=cached_response,
             model=model,
@@ -55,6 +63,8 @@ async def generate_text(request: GenerateRequest):
         )
 
     try:
+        logger.info(f"Generating text with model: {model}")
+        
         # Use Ollama
         response = requests.post(
             f"{settings.ollama_api_url}/api/generate",
@@ -64,15 +74,28 @@ async def generate_text(request: GenerateRequest):
                 "options": {
                     "num_predict": request.max_tokens,
                     "temperature": request.temperature
-                }
+                },
+                "stream": False
             },
             timeout=settings.ollama_timeout
         )
         response.raise_for_status()
-        generated_text = response.json()["response"]
+        
+        response_data = response.json()
+        logger.info(f"Ollama response: {response_data}")
+        
+        generated_text = response_data.get("response", "")
+        if not generated_text:
+            raise HTTPException(
+                status_code=500,
+                detail="No response generated from Ollama"
+            )
         
         # Cache the response
-        cache.set(cache_key, generated_text)
+        if cache.set(cache_key, generated_text):
+            logger.info(f"Cached response for key: {cache_key[:50]}...")
+        else:
+            logger.warning("Failed to cache response")
         
         return GenerateResponse(
             text=generated_text,
@@ -80,14 +103,22 @@ async def generate_text(request: GenerateRequest):
             cached=False
         )
     except requests.exceptions.Timeout:
+        logger.error("Request to Ollama timed out")
         raise HTTPException(
             status_code=504,
             detail="Request to Ollama timed out"
         )
     except requests.exceptions.RequestException as e:
+        logger.error(f"Error generating text: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Error generating text: {str(e)}"
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected error: {str(e)}"
         )
 
 @router.get("/models", response_model=List[str])
@@ -98,13 +129,15 @@ async def list_models():
             timeout=settings.ollama_timeout
         )
         response.raise_for_status()
-        models = response.json().get("models", [])
+        data = response.json()
+        models = [model.get("name", "") for model in data.get("models", [])]
         
         if not models:
             return [settings.ollama_model]  # Return default model if no others found
             
         return models
     except Exception as e:
+        logger.error(f"Error fetching models: {str(e)}")
         raise HTTPException(
             status_code=503,
             detail=f"Error fetching models: {str(e)}"
@@ -130,5 +163,11 @@ async def health_check():
     return {
         "status": "healthy",
         "ollama": ollama_healthy,
-        "cache": cache_healthy
+        "cache": cache_healthy,
+        "cache_type": "memory"
     }
+
+@router.get("/cache/stats")
+async def cache_stats():
+    """Get cache statistics"""
+    return cache.get_stats()
